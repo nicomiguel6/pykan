@@ -13,6 +13,7 @@ kan/compiler.py
 kan/experiment.py
 kan/feynman.py
 kan/hypothesis.py
+kan/models.py
 kan/spline.py
 kan/utils.py
 kan/assets/img/mult_symbol.png
