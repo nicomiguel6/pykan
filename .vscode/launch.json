@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Debug with Specific Working Directory",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${fileDirname}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src" // Adjust this path as needed
+            },
+            "python": "/Users/nmiguel/.pyenv/versions/3.9.7/envs/CBFKAN/bin/python"
+        }
+    ]
+}

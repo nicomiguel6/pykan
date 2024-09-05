@@ -9,13 +9,11 @@ from cvxopt import matrix, solvers
 
 # For setting up basic neural network to train on the CBF dataset
 class FCNet(nn.Module):
-    def __init__(self, nFeatures, nHidden1, nHidden21, nHidden22, nCls, mean, std, device, bn):
+    def __init__(self, nFeatures, nHidden1, nOut, mean, std, device, bn):
         super().__init__()
         self.nFeatures = nFeatures
         self.nHidden1 = nHidden1
-        self.nHidden21 = nHidden21
-        self.nHidden22 = nHidden22
-        self.nCls = nCls
+        self.nCls = nOut
         self.mean = mean
         self.std = std
         self.device = device
@@ -24,11 +22,9 @@ class FCNet(nn.Module):
         # Normal BN/FC layers.
         if bn:
             self.bn1 = nn.BatchNorm1d(nHidden1)
-            self.bn21 = nn.BatchNorm1d(nHidden21)
 
         self.fc1 = nn.Linear(nFeatures, nHidden1).double()
-        self.fc21 = nn.Linear(nHidden1, nHidden21).double()
-        self.fc31 = nn.Linear(nHidden21, nCls).double()
+        self.fc21 = nn.Linear(nHidden1, nOut).double()
     
     def forward(self, x, sgn):
         nBatch = x.size(0)
@@ -40,13 +36,10 @@ class FCNet(nn.Module):
         if self.bn:
             x = self.bn1(x)
         
-        x21 = F.relu(self.fc21(x))
-        if self.bn:
-            x21 = self.bn21(x21)
+        x21 = self.fc21(x)  # No activation function here for regression
         
-        x31 = self.fc31(x21)
-        
-        return x31
+        return x21
+
     
 # def kanParams():
 #     def __init__(self, width, **kwargs):
@@ -78,7 +71,7 @@ class FCNet(nn.Module):
         
     
 # For setting up basic CBF
-def CBF():
+class CBF:
     def __init__(self, dims, function):
         super().__init__()
         self.dims = dims
