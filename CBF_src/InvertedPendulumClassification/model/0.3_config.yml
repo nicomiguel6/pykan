@@ -13,7 +13,7 @@ mult_arity: 2
 round: 0
 sb_trainable: true
 sp_trainable: true
-state_id: 0
+state_id: 3
 symbolic.funs_name.0:
 - - '0'
   - '0'
@@ -83,7 +83,7 @@ symbolic.funs_name.3:
   - '0'
   - '0'
   - '0'
-symbolic_enabled: true
+symbolic_enabled: false
 width:
 - - 2
   - 0

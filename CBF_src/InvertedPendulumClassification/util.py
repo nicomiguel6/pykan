@@ -22,8 +22,8 @@ class InvertedPendulum(PendulumEnv):
         self.mode = mode
 
         # Define the new observation space
-        high = np.array([2*np.pi, 8.0], dtype=np.float32)
-        low = np.array([0, -8.0], dtype=np.float32)
+        high = np.array([np.pi, 5.0], dtype=np.float32)
+        low = np.array([-np.pi, -5.0], dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
 
     def step(self, action):
@@ -55,9 +55,14 @@ class InvertedPendulum(PendulumEnv):
         self.last_u = u  # for rendering
         costs = angle_normalize(th) ** 2 + 0.1 * thdot**2 + 0.001 * (u**2)
 
-        newthdot = thdot + (2 * g / (2 * l) * np.sin(th) + 1.0 / (m * l**2) * u) * dt
+        th_ddot = (g / l) * np.sin(th) + 0.1 / (m*l**2) * thdot + u / (m*l**2)
+        newthdot = thdot + th_ddot * dt
         newthdot = np.clip(newthdot, -self.max_speed, self.max_speed)
         newth = th + newthdot * dt
+
+        # newthdot = thdot + (g / (l) * np.sin(th) + 0.1 / (m * l**2) * u) * dt
+        # newthdot = np.clip(newthdot, -self.max_speed, self.max_speed)
+        # newth = th + newthdot * dt
 
         self.state = np.array([newth, newthdot])
 
@@ -67,7 +72,7 @@ class InvertedPendulum(PendulumEnv):
     
     def reset(self):
         #self.state = np.array([np.random.uniform(0, 2*np.pi), np.random.uniform(-8.0, 8.0)])
-        self.state = np.array([-0.1,0.5])
+        self.state = np.array([-1.9,-0.05])
         return self.state
     
     def _get_obs(self):
@@ -78,10 +83,12 @@ class InvertedPendulum(PendulumEnv):
     def f(self, x):
         l = self.l
         g = self.g
+        m = self.m
 
         theta = x[0]
         theta_dot = x[1]
 
+        #f = torch.tensor([theta_dot, (g / l) * torch.sin(theta) + 0.1 / (m*l**2) * theta_dot], dtype=torch.float32)
         f = np.array([theta_dot, 2*g/(2*l)*np.sin(theta)])
 
         return f
@@ -91,6 +98,7 @@ class InvertedPendulum(PendulumEnv):
         l = self.l
 
         g_dyn = np.array([0, 1/(m*l**2)])
+        #g_dyn = torch.tensor([0, 1/(m*l**2)], dtype=torch.float32)
 
         return g_dyn
     
@@ -274,6 +282,9 @@ class FCNet(nn.Module):
 
         self.fc_layers = nn.ModuleList([nn.Linear(width[i], width[i+1]).double() for i in range(len(width)-1)])
     
+    def set_environment(self, environment):
+        self.environment = environment
+    
     def forward(self, x, sgn):
         nBatch = x.size(0)
 
@@ -281,7 +292,8 @@ class FCNet(nn.Module):
         x = x.view(nBatch, -1)
         
         for i in range(len(self.fc_layers)-1):
-            x = F.relu(self.fc_layers[i](x))
+            #x = F.relu(self.fc_layers[i](x))
+            x = F.tanh(self.fc_layers[i](x))
             if self.bn:
                 x = self.bn_layers[i](x)
         
@@ -296,18 +308,81 @@ class FCNet(nn.Module):
     def get_dataloaders(self):
         return self.train_dataloader, self.test_dataloader
     
-    def train_model(self, model, loss_fn, optimizer, losses, test_losses=[]):
+    def loss_function(self, input, prediction, label):
+
+        ## Split into four individual loss functions: 
+        # mean of prediction for initial states, 
+        # mean of prediction for unsafe states, 
+        # mean of equality constraint for all states,
+        # mean of relative difference between ranked states
+        loss_safe = []
+        loss_unsafe = []
+        loss_desc = []
+        #loss_rank = torch.tensor(0.0, dtype=torch.float64).to(self.device)
+
+        for iter, pred in enumerate(prediction):
+            if label[iter] == 1:  # safe
+                loss_safe.append(pred)
+            elif label[iter] == 0: # unsafe
+                loss_unsafe.append(-1*pred)
+
+            x = input[iter]
+            
+            dBdx = self.dx[iter]
+            LfB = torch.dot(dBdx, torch.tensor(self.environment.f(x), dtype=torch.float64))
+            LgB = torch.dot(dBdx, torch.tensor(self.environment.g_dyn(), dtype=torch.float64))
+            ind_desc_loss = LfB + LgB*torch.tensor(self.environment.ref_controller(x), dtype=torch.float64) + pred
+            loss_desc.append(ind_desc_loss)
+
+
+        # ## Ranked loss for marked states
+        # marked_states = torch.tensor([[1.5, 0.0], [0.0, 1.5], [-1.5, 0.0], [0.0, -1.5]], dtype=torch.float32).to(self.device)
+        reference_state = torch.tensor([0.0, 0.0], dtype=torch.float64).to(self.device)
+        # desired_ratio = 0.5
+
+        # Compute the reference state prediction (it needs to be part of the graph for gradient computation)
+        ref_state = reference_state.unsqueeze(0).clone().requires_grad_(True)  # Requires gradient
+        pred_ref = self.forward(ref_state, 1)  # Part of the forward pass
+        desired_ref = torch.tensor([-0.2], dtype=torch.float64).to(self.device)
+
+        # for state in marked_states:
+        #     state = state.unsqueeze(0).clone().requires_grad_(True)  # Requires gradient
+        #     pred_state = self.forward(state)
+            
+        #     # Calculate the actual ratio and compare to the desired ratio
+        #     actual_ratio = pred_state / pred_ref
+        #     difference = actual_ratio - desired_ratio
+            
+        #     # Compute the squared difference as part of the loss
+        #     loss_rank += (torch.norm(difference))**2  # Ensure gradients can flow
+        
+        loss_rank = torch.norm(pred_ref - desired_ref)**2
+
+
+        ## Take mean and reLu
+        loss_safe_mean = torch.relu(torch.mean(torch.stack(loss_safe)))
+        loss_unsafe_mean = torch.relu(torch.mean(torch.stack(loss_unsafe)))
+        loss_desc_mean = torch.relu(torch.mean(torch.stack(loss_desc)))
+
+        total_loss = loss_safe_mean + loss_unsafe_mean + loss_desc_mean + loss_rank     
+        print('Total loss: ', total_loss)
+
+        return total_loss
+
+    def train_model(self, model, optimizer, losses, environment, test_losses=[]):
         
         dataloader, test_dataloader = self.get_dataloaders()
         
         size = len(dataloader.dataset)
         model.train()
         for batch, (X, y) in enumerate(dataloader):
-            X, y = X.to(self.device), y.to(self.device)
+            X, y = X.to(self.device).clone().requires_grad_(True), y.to(self.device)
             
             # Compute prediction error
             pred = model(X, 1)
-            loss = loss_fn(pred, y)
+            dx = torch.autograd.grad(pred, X, grad_outputs=torch.ones_like(pred), create_graph=True)[0]
+            self.dx = dx
+            loss = self.loss_function(X, pred, y)
             losses.append(loss.item())
 
             # Backpropagation
@@ -345,7 +420,7 @@ class FCNet(nn.Module):
 ## Define KAN wrapper class
 class kanNetwork(KAN):
     def __init__(self, environment, width, grid, k, device, dataset: Optional[np.ndarray] = None):
-        super().__init__(width=width, grid=grid, k=k, device=device, base_fun='identity')
+        super().__init__(width=width, grid=grid, k=k, seed = 1, device=device)
         self.device = device
         self.width = width
         self.environment = environment
@@ -359,77 +434,80 @@ class kanNetwork(KAN):
     
     def results(self, dataset, opt, steps, lr):
         loss_fn = self.loss_function()
-        results = self.fit(dataset=dataset, opt=opt, steps=steps, lr=lr, loss_fn=loss_fn)
+        results = self.fit(dataset=dataset, opt=opt, steps=steps, lr=lr, loss_fn=loss_fn, lamb=0.01)
         return results
-
+    
     def loss_function(self):
         def compute_loss(prediction, label):
 
-            ## Split into three individual loss functions: mean of prediction for initial states, mean of prediction for unsafe states, and meand of equality constraint for all states
-            loss_safe = 0.
-            loss_unsafe = 0.
-            loss_desc = 0.
+            ## Split into four individual loss functions: 
+            # mean of prediction for initial states, 
+            # mean of prediction for unsafe states, 
+            # mean of equality constraint for all states,
+            # mean of relative difference between ranked states
+            loss_safe = []
+            loss_unsafe = []
+            loss_desc = []
+            loss_rank = torch.tensor(0.0, dtype=torch.float32).to(self.device)
+            
+            mapping = self.train_mapping
+
+            if self.loss_mode == 'train':
+                mapping = self.train_mapping
+            elif self.loss_mode == 'test':
+                mapping = self.test_mapping
 
             ## iterate through unsafe states [want the predictions to be negative]
             num_unsafe = len(self.id_dict['train_id']['unsafe'])
             for iter in self.id_dict['train_id']['unsafe']:
-                loss_unsafe += prediction[iter].item()
+                jter = mapping[iter]
+                loss_unsafe.append(-1*prediction[jter])
             
             ## iterate through safe states [want the predictions to be positive]
             num_safe = len(self.id_dict['train_id']['initial'])
             for iter in self.id_dict['train_id']['initial']:
-                loss_safe += prediction[iter].item()
+                jter = mapping[iter]
+                loss_safe.append(prediction[jter])
             
             ## iterate through all states
-            for iter in range(len(prediction)):
-                x = self.dataset['train_input'][self.train_id[iter]]
-                dBdx = self.dx[iter].detach().numpy()
-                LfB = dBdx @ self.environment.f(x)
-                LgB = dBdx @ self.environment.g_dyn()
-                ind_desc_loss = LfB + LgB*self.environment.ref_controller(x) + prediction[iter].item()
-                loss_desc += ind_desc_loss
+            for iter, jter in mapping.items():
+                x = self.dataset['train_input'][iter]
+                dBdx = self.dx[jter]
+                LfB = torch.dot(dBdx, torch.tensor(self.environment.f(x), dtype=torch.float32))
+                LgB = torch.dot(dBdx, torch.tensor(self.environment.g_dyn(), dtype=torch.float32))
+                #u = np.array([-0.3286, -0.5950]) @ x
+                #u_torch = torch.tensor(u, dtype=torch.float32)
+                ind_desc_loss = LfB + LgB*torch.tensor(self.environment.ref_controller(x), dtype=torch.float32) + prediction[jter]
+                loss_desc.append(ind_desc_loss)
+
+            # ## Ranked loss for marked states
+            # marked_states = torch.tensor([[1.5, 0.0], [0.0, 1.5], [-1.5, 0.0], [0.0, -1.5]], dtype=torch.float32).to(self.device)
+            # reference_state = torch.tensor([0.0, 0.0], dtype=torch.float32).to(self.device)
+            # desired_ratio = 0.5
+
+            # Compute the reference state prediction (it needs to be part of the graph for gradient computation)
+            # ref_state = reference_state.unsqueeze(0).clone().requires_grad_(True)  # Requires gradient
+            # pred_ref = self.forward(ref_state)  # Part of the forward pass
+
+            # for state in marked_states:
+            #     state = state.unsqueeze(0).clone().requires_grad_(True)  # Requires gradient
+            #     pred_state = self.forward(state)
+                
+            #     # Calculate the actual ratio and compare to the desired ratio
+            #     actual_ratio = pred_state / pred_ref
+            #     difference = actual_ratio - desired_ratio
+                
+            #     # Compute the squared difference as part of the loss
+            #     loss_rank += (torch.norm(difference))**2  # Ensure gradients can flow
             
+            # loss_rank = torch.norm(pred_ref - 5.0)**2
+
+
             ## Take mean and reLu
-            loss_safe_mean = torch.relu(torch.tensor(-loss_safe/num_safe))
-            loss_unsafe_mean = torch.relu(torch.tensor(loss_unsafe/num_unsafe))
-            loss_desc_mean = torch.relu(torch.tensor(-loss_desc/len(prediction)))
-            
-            # # loop through all predictions, identify label
-            # for iter, pred in enumerate(prediction):
-            #     # extract input
-            #     x = self.dataset['train_input'][self.train_id[iter]]
-            #     #x_tensor = torch.tensor(x, dtype=torch.float32, requires_grad=True).to(self.device).unsqueeze(0)
-            #     x_tensor = x.to(self.device).clone().detach().requires_grad_(True)
-            #     ## calculate descent loss
-            #     # take gradient of model with respect to input
-            #     pred_new = self.forward(x_tensor, singularity_avoiding=False, y_th=1000.)
-            #     pred_new.requires_grad_()
-            #     dBdx = torch.autograd.grad(pred_new, x_tensor, create_graph=True)[0]
-            #     dBdx = dBdx.detach().numpy()
+            loss_safe_mean = torch.relu(torch.tensor(torch.mean(torch.tensor(loss_safe, dtype=torch.float32))))
+            loss_unsafe_mean = torch.relu(torch.tensor(torch.mean(torch.tensor(loss_unsafe, dtype=torch.float32))))
+            loss_desc_mean = torch.relu(torch.tensor(torch.mean(torch.tensor(loss_desc, dtype=torch.float32))))
 
-            #     LfB = np.array(dBdx @ self.environment.f(x)).item()
-            #     LgB = np.array(dBdx @ self.environment.g_dyn()).item()
-            #     ind_desc_loss = LfB + LgB*self.environment.ref_controller(x) + pred_new.detach().numpy()
-            #     ## calculate the descent loss
-            #     loss_desc.append(ind_desc_loss.item())
-
-            #     if label[iter] == 0: # safe
-            #         loss_safe.append(pred_new.detach().numpy())
-            #     elif label[iter] == 1: # unsafe
-            #         loss_unsafe.append(pred_new.detach().numpy()) 
-
-        # # Convert lists to numpy arrays before converting to tensors
-        #     loss_safe_np = np.array(loss_safe)
-        #     loss_safe_tensor = torch.tensor(loss_safe_np, dtype=torch.float64)
-        #     loss_safe_mean = torch.relu(-torch.mean(loss_safe_tensor))
-
-        #     loss_unsafe_np = np.array(loss_unsafe)
-        #     loss_unsafe_tensor = torch.tensor(loss_unsafe_np, dtype=torch.float64)
-        #     loss_unsafe_mean = torch.relu(-torch.mean(loss_unsafe_tensor))
-
-        #     loss_desc_np = np.array(loss_desc)
-        #     loss_desc_tensor = torch.tensor(loss_desc_np, dtype=torch.float64)
-        #     loss_desc_mean = torch.relu(-torch.mean(loss_desc_tensor))
 
             return loss_safe_mean + loss_unsafe_mean + loss_desc_mean
         return compute_loss
@@ -515,33 +593,53 @@ def generate_dictionary(n_samples, random_state=None):
 
     generator = np.random.RandomState(random_state)
 
-    x_theta = generator.uniform(-np.pi, np.pi, n_samples)
-    x_thetadot = generator.uniform(-8.0, 8.0, n_samples)
+    data_dict = {'initial': [], 'unsafe': [], 'ranked': []}
 
-    X = np.vstack((x_theta, x_thetadot)).T
+    r = 2.0
+    theta = np.linspace(-np.pi, np.pi, n_samples*2)
+    a, b = r*np.cos(theta), r*np.sin(theta)
 
-    y = np.zeros(n_samples)
+    t = generator.uniform(0, 1, size=n_samples)
+    u = generator.uniform(0, 1, size=n_samples)
 
-    data_dict = {'initial': [], 'unsafe': [], 'all': []}
+    x_theta_safe = r*np.sqrt(t)*np.cos(2*np.pi*u)
+    x_thetadot_safe = r*np.sqrt(t)*np.sin(2*np.pi*u)
 
-    dataset = {}
+    X_safe = np.vstack((x_theta_safe, x_thetadot_safe)).T
 
-    for iter, state in enumerate(X):
-        theta = state[0]
-        theta_dot = state[1]
+    X_new = []
+    y = []
 
-        data_dict['all'].append(state)
+    for state in X_safe:
+        X_new.append(state)
+        y.append(1)
 
-        if np.linalg.norm(state) >= 2.5 and np.linalg.norm(state) <= 3:
-            data_dict['unsafe'].append(state)
-            y[iter] = 1
-        elif np.linalg.norm(state) <= 2.0:
-            data_dict['initial'].append(state)
+    r1 = 2.0
+    r2 = 10.0
+    t = generator.uniform((r1/r2)**2, 1, size=n_samples)
+    u = generator.uniform(0, 1, size=n_samples)
+
+    x_theta_unsafe = r2*np.sqrt(t)*np.cos(2*np.pi*u)
+    x_thetadot_unsafe = r2*np.sqrt(t)*np.sin(2*np.pi*u)
+
+    X_unsafe = np.vstack((x_theta_unsafe, x_thetadot_unsafe)).T
+
+    for state in X_unsafe:
+        X_new.append(state)
+        y.append(0)
+    
+    #data_dict['ranked'] = {'points': [np.array([0.0, 0.0])]}
     
 
+    return np.array(X_new), np.array(y)
 
-
-    return data_dict, X, y
+def plot_samples(X):
+    X = X.reshape(-1, 2)
+    plt.figure()
+    plt.scatter(X[:,0], X[:,1])
+    plt.xlabel('theta')
+    plt.ylabel('thetadot')
+    plt.show()
 
 
 

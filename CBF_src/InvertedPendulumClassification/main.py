@@ -5,6 +5,7 @@ import torch
 import cvxopt as cvx
 from util import *
 import matplotlib.pyplot as plt
+from matplotlib import cm
 import gymnasium as gym
 from kan import *
 
@@ -14,8 +15,8 @@ print(f"Device: {device}")
 
 
 ## initial dataset (always starts in an area where the norm of the state vector is less than 2)
-dataset_train, train_input, train_label = generate_dictionary(n_samples=1000, random_state=2024)
-dataset_test, test_input, test_label = generate_dictionary(n_samples=1000, random_state=2025)
+train_input, train_label = generate_dictionary(n_samples=500, random_state=2024)
+test_input, test_label = generate_dictionary(n_samples=500, random_state=2025)
 
 dataset = {}
 dtype = torch.get_default_dtype()
@@ -25,7 +26,7 @@ dataset['train_label'] = torch.from_numpy(train_label[:,None]).type(dtype).to(de
 dataset['test_label'] = torch.from_numpy(test_label[:,None]).type(dtype).to(device)
 
 # ## Define gym Inverted Pendulum env
-env = InvertedPendulum(a=0.25, b=0.5, Kp=0.6, Kd=0.6, render_mode='human')
+env = InvertedPendulum(a=0.25, b=0.5, Kp=0.6, Kd=0.6, render_mode='human', mode='NN')
 
 ## Define proposed ground truth CBF
 a = 0.25
@@ -39,188 +40,10 @@ gamma = 1
 alpha = lambda h, u_ref: gamma*h
 env.set_alpha(alpha)
 
-## test basic controller with CBF
-
-## simulation parameters
-num_steps = 300
-CBF_states = []
-CBF_actions = []
-CBF_actual_cbf_value = []
-
-## simulation loop
-state = env.reset() # Always in CW+ reference frame
-for step in range(num_steps):
-    action = env.ref_controller(state)
-    #action = np.random.uniform(-10.0, 10.0)
-    next_state, _, _, done, _ = env.step(action)
-    CBF_states.append(state)
-    CBF_actions.append(action)
-    CBF_actual_cbf_value.append(env.h(state, action))
-    state = next_state 
-    if done:
-        break
-    #env.render()
-    if step == num_steps - 1:
-        print("Inverted Pendulum did not fall in {} steps".format(num_steps))
-
-env.close()
-
-# Convert lists to numpy arrays for easier manipulation
-CBF_states = np.array(CBF_states)
-CBF_actions = np.array(CBF_actions)
-CBF_actual_cbf_value = np.array(CBF_actual_cbf_value)
-
-# ----------------------------------------------
-## Initialize KAN
-env = InvertedPendulum(a=0.25, b=0.5, Kp=0.6, Kd=0.6, render_mode='human', mode = 'KAN')
-#env.set_CBF(CBF)
-
-# ## Define alpha
-# gamma = 1
-# alpha = lambda h, u_ref: gamma*h
-env.set_alpha(alpha)
-
-kanModel = kanNetwork(environment=env, width=[2, 4, 1], grid=10, k=3, device=device, dataset = dataset)
-
-## Create dataset [this will generate training points, but does not show the model the actual CBF]
-## Define KAN CBF
-a = 0.25
-b = 0.5
-kan_CBF = lambda x: 1 - ((x[:,[0]]**2)/a**2) - ((x[:,[1]]**2)/b**2) - ((x[:,[0]]*x[:,[1]])/(a*b))
-env.set_CBF(CBF)
-
-## Train KAN
-results = kanModel.results(kanModel.dataset, opt='LBFGS', steps=20, lr=1e-3)
-
-
-## Assign KAN to the environment
-env.set_KAN_CBF(kanModel)
-
-## test KAN controller with CBF
-## simulation parameters
-num_steps = 300
-KAN_states = []
-KAN_actions = []
-KAN_actual_cbf_value = []
-
-## simulation loop
-state = env.reset()
-for step in range(num_steps):
-    action = env.ref_controller(state)
-    # choose random action and convert to float
-    # action = np.random.uniform(-10.0, 10.0)
-    next_state, _, _, done, _ = env.step(action)
-    KAN_states.append(state)
-    KAN_actions.append(action)
-    KAN_actual_cbf_value.append(env.h(state, action))
-    state = next_state 
-    if done:
-        break
-    #env.render()
-    if step == num_steps - 1:
-        print("Inverted Pendulum did not fall in {} steps".format(num_steps))
-
-#kanModel.plot_results(results)
-env.close()
-
-# Convert lists to numpy arrays for easier manipulation
-KAN_states = np.array(KAN_states)
-KAN_actions = np.array(KAN_actions)
-KAN_actual_cbf_value = np.array(KAN_actual_cbf_value)
-
-# # Plot results (optional)
-# plt.figure()
-# plt.subplot(2, 1, 1)
-# plt.plot(states[:, 0], label='Angle')
-# plt.plot(states[:, 1], label='Angular Velocity')
-# plt.legend()
-# plt.title('States over Time')
-
-# plt.subplot(2, 1, 2)
-# plt.plot(actions, label='Actions')
-# plt.legend()
-# plt.title('Actions over Time')
-
-# plt.show()
-
-## Plot safe set vs trajectory
-plt.figure()
-## Create 2D grid of states
-x = np.linspace(-0.5, 0.5, 500)
-y = np.linspace(-0.7, 0.7, 500)
-X, Y = np.meshgrid(x, y)
-states_grid = np.column_stack((X.flatten(), Y.flatten()))
-
-## Calculate CBF values for each state in the grid
-cbf_values = []
-for pair in states_grid:
-    h_temp = env.h(pair, 0)
-    cbf_values.append(h_temp)
-cbf_values = np.array(cbf_values)
-
-# # ## Calculate KAN values for each state in the grid
-# # kan_values = []
-# # for pair in states_grid:
-# #     x_tensor = torch.tensor(pair, dtype=torch.float32, requires_grad=True).to(device).unsqueeze(0)
-# #     kan_values.append(kanModel(x_tensor).detach().cpu().numpy())
-# # kan_values = np.array(kan_values)
-
-# # # Plot results (optional)
-# # plt.figure()
-# # # Plot states
-# # plt.subplot(2, 1, 1)
-# # for i in range(len(states)):
-# #     color = 'red' if actual_cbf_value[i] < 0 else 'blue'
-# #     plt.scatter(i, states[i, 0], color=color, label='Angle' if i == 0 else "")
-# #     plt.scatter(i, states[i, 1], color=color, label='Angular Velocity' if i == 0 else "")
-# # plt.legend()
-# # plt.title('States over Time')
-
-# # # Plot actions
-# # plt.subplot(2, 1, 2)
-# # plt.plot(actions, label='Actions')
-# # plt.legend()
-# # plt.title('Actions over Time')
-
-# # plt.show()
-
-# ## Initialize InvertedPendulum for NN
-env = InvertedPendulum(a=0.25, b=0.5, Kp=0.6, Kd=0.6, render_mode='human', mode = 'NN')
-env.set_CBF(CBF)
-env.set_alpha(alpha)
-
-## Create dataset for FCNN
-num_samples = 1000
-train_data = np.zeros((num_samples,2))
-train_labels = np.zeros((num_samples,1))
-
-# Generate training points with labels
-train_data = np.zeros((num_samples, 2))
-train_labels = np.zeros((num_samples, 1))
-# for iter in range(num_samples):
-#     x = np.random.rand(1, 2) * 100
-#     y = kan_CBF(x)
-#     # print(f'x: {x}, y: {y}')
-
-#     train_data[iter, :] = x
-#     train_labels[iter] = y
-
-
-# Generate testing points with labels
-test_data = np.zeros((num_samples, 2))
-test_labels = np.zeros((num_samples, 1))
-# for iter in range(num_samples):
-#     x = np.random.rand(1, 2) * num_samples
-#     y = kan_CBF(x)
-#     # print(f'x: {x}, y: {y}')
-
-#     test_data[iter, :] = x
-#     test_labels[iter] = y
-
-train_data = np.double(kanModel.dataset['train_input'])
-train_labels = np.double(kanModel.dataset['train_label'])
-test_data = np.double(kanModel.dataset['test_input'])
-test_labels = np.double(kanModel.dataset['test_label'])
+train_data = np.double(dataset['train_input'])
+train_labels = np.double(dataset['train_label'])
+test_data = np.double(dataset['test_input'])
+test_labels = np.double(dataset['test_label'])
     
 # Parameters
 params = {'batch_size': 50,
@@ -234,24 +57,27 @@ test_set = Dataset_list(test_data, test_labels)
 test_dataloader = torch.utils.data.DataLoader(test_set, **params)
 
 ## Create FCNN (equivalent is to have L hidden layers of width N)
-model = FCNet(width=[2,4,1], mean=0, std=1, device=device, bn=False)
+model = FCNet(width=[2,16,16,1], mean=0, std=1, device=device, bn=False)
 model.set_dataloaders(train_dataloader, test_dataloader)
+model.set_environment(env)
 
 # Initialize the optimizer.
 learning_rate = 1e-3
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-loss_fn = nn.MSELoss()
 
-epochs = 10
-train_losses, test_losses = [], []
-for t in range(epochs):
-    print(f"Epoch {t+1}\n-------------------------------")
-    train_losses = model.train_model(model, loss_fn, optimizer, train_losses)
-    #test_losses = model.test(test_dataloader, model, loss_fn, test_losses)
-print("Training Done!")
+# epochs = 20
+# train_losses, test_losses = [], []
+# for t in range(epochs):
+#     print(f"Epoch {t+1}\n-------------------------------")
+#     train_losses = model.train_model(model, optimizer, train_losses, env)
+#     #test_losses = model.test(test_dataloader, model, loss_fn, test_losses)
+# print("Training Done!")
 
-torch.save(model.state_dict(), "model_fc.pth")
-print("Saved PyTorch Model State to model_xx.pth")
+model = model.double()
+model.load_state_dict(torch.load('model_fc.pth'))
+
+# torch.save(model.state_dict(), "model_fc.pth")
+# print("Saved PyTorch Model State to model_xx.pth")
 env.set_NN_CBF(model)
 
 ## simulation loop
@@ -261,8 +87,8 @@ NN_actions = []
 NN_actual_cbf_value = []
 state = env.reset()
 for step in range(num_steps):
-    #action = env.ref_controller(state)
-    action = np.random.uniform(-10.0, 10.0)
+    action = env.ref_controller(state)
+    #action = np.random.uniform(-10.0, 10.0)
     next_state, _, _, done, _ = env.step(action)
     NN_states.append(state)
     NN_actions.append(action)
@@ -281,59 +107,70 @@ NN_actual_cbf_value = np.array(NN_actual_cbf_value)
 ## Plot safe set vs trajectory
 plt.figure()
 ## Create 2D grid of states
-x = np.linspace(-0.5, 0.5, 500)
-y = np.linspace(-0.7, 0.7, 500)
+x = np.linspace(-3.0, 3.0, 1000)
+y = np.linspace(-3.0, 3.0, 1000)
 X, Y = np.meshgrid(x, y)
 states_grid = np.column_stack((X.flatten(), Y.flatten()))
 
-## Calculate CBF values for each state in the grid
-cbf_values = []
-for pair in states_grid:
-    h_temp = env.h(pair, 0)
-    cbf_values.append(h_temp)
-cbf_values = np.array(cbf_values)
 
-
-
-# ## Calculate KAN values for each state in the grid
-# kan_values = []
+# ## Calculate CBF values for each state in the grid
+# cbf_values = []
 # for pair in states_grid:
-#     x_tensor = torch.tensor(pair, dtype=torch.float32, requires_grad=True).to(device).unsqueeze(0)
-#     kan_values.append(kanModel(x_tensor).detach().cpu().numpy())
-# kan_values = np.array(kan_values)
+#     #h_temp = env.h(pair, 0)
+#     h_temp = np.linalg.norm(pair)
+#     cbf_values.append(h_temp)
+# cbf_values = np.array(cbf_values)
+
+# for pair in states_grid:
+#     #h_temp = env.h(pair, 0)
+#     h_temp = np.linalg.norm(pair)
+#     cbf_values.append(h_temp)
+# cbf_values = np.array(cbf_values)
+
+# Plot circular region for all states where the norm of the state vector is less than 2
+plt.scatter(states_grid[np.linalg.norm(states_grid, axis=1) < 2.0][:,0], states_grid[np.linalg.norm(states_grid, axis=1) < 2.0][:,1], marker='.', c='gold', label='Safe Set', alpha=0.3)
 
 
-plt.scatter(states_grid[:, 0], states_grid[:, 1], marker='.', c=np.where(cbf_values > 0, 'gold', 'white'), label='Safe Set' if np.any(cbf_values > 0) else None, alpha=0.3)
-#plt.scatter(states_grid[:, 0], states_grid[:, 1], marker='.', c=np.where(kan_values > 0, 'red', 'white'), label='KAN Safe Set' if np.any(cbf_values > 0) else None, alpha=0.1)
-## Plot safe set vs trajectory
-plt.plot(CBF_states[:, 0], CBF_states[:, 1], color='red', linestyle='dotted', label='CBF Trajectory')
-plt.plot(NN_states[:, 0], NN_states[:, 1], color='blue', linestyle='dotted', label='NN Trajectory')
-plt.plot(KAN_states[:, 0], KAN_states[:, 1], color='green', linestyle='dotted', label='KAN Trajectory')
-plt.xlim(-0.4, 0.4)
-plt.ylim(-0.8, 0.8)
+# Plot state trajectory
+plt.plot(NN_states[:,0], NN_states[:,1], label='NN controller')
+
+plt.xlabel(r'$\theta$')
+plt.ylabel(r'$\dot{\theta}$')
 plt.legend()
 plt.title('Safe Set vs Trajectory')
 plt.show()
 
-## Plot CBF values vs time
-plt.figure()
-plt.plot(CBF_actual_cbf_value, label='CBF')
-plt.plot(NN_actual_cbf_value, label='NN')
-plt.plot(KAN_actual_cbf_value, label='KAN')
-plt.legend()
-plt.title('CBF Values over Time')
+
+
+## Calculate CBF values for each state in the grid
+cbf_values = np.linalg.norm(states_grid, axis=1)
+
+states_grid_torch = torch.tensor(states_grid, dtype=torch.float64).to(device)
+
+#fig, ax = plt.subplots()
+## 3d plot
+fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+nn_values = model(states_grid_torch, 1).detach().cpu().numpy()
+## sort out all states that are not in the safe set
+nn_states_grid = states_grid[np.where(nn_values > 0.0)]
+
+kan_values = nn_values.reshape(X.shape)
+
+
+#ax.contourf(X, Y, cbf_values.reshape(X.shape), cmap='Blues')
+num_levels = 100  # Increase this number for finer color gradations
+#surf = ax.contourf(X, Y, kan_values, cmap=cm.coolwarm, antialiased=False)
+surf = ax.plot_surface(X, Y, kan_values, cmap=cm.coolwarm, antialiased=False)
+#cbar_ticks = np.linspace(-5.0, 5.0, 21)  # 21 intervals from -5.0 to 5.0
+
+#plt.scatter(kan_states_grid[:, 0], kan_states_grid[:, 1], marker='.', c='red', label='KAN Safe Set', alpha=0.3)
+#ax.set_zlim(-0.1, 0.05)
+fig.colorbar(surf)
+ax.set_title('Safe Set vs Trajectory')
+ax.set_xlabel(r'$\theta$')
+ax.set_ylabel(r'$\dot{\theta}$')
 plt.show()
 
-# print(np.shape(train_losses))
-# print(np.shape(test_losses))
-
-# plt.plot(train_losses)
-# plt.plot(test_losses)
-# plt.legend(['train', 'test'])
-# plt.ylabel('RMSE')
-# plt.xlabel('step')
-# plt.yscale('log')
-# plt.show()
 
 
 

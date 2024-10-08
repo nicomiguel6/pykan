@@ -22,8 +22,11 @@ class InvertedPendulum(PendulumEnv):
         self.mode = mode
 
         # Define the new observation space
-        high = np.array([2*np.pi, 200.0], dtype=np.float32)
-        low = np.array([0, -200.0], dtype=np.float32)
+        high = np.array([2*np.pi, 8.0], dtype=np.float32)
+        low = np.array([0, -8.0], dtype=np.float32)
+        self.high = high
+        self.low = low
+
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
 
     def step(self, action):
@@ -65,9 +68,26 @@ class InvertedPendulum(PendulumEnv):
         #     self.render()
         return self._get_obs(), -costs, False, False, {}
     
+    def safe_states(self, num_points):
+        x = np.linspace(-1.0, 1.0, num_points)
+        y = np.linspace(-1.0, 1.0, num_points)
+        X, Y = np.meshgrid(x, y)
+        states_grid = np.column_stack((X.flatten(), Y.flatten()))
+
+        # only return states that are safe
+        safe_states = []
+        for state in states_grid:
+            if self.h(state, 0) > 0 and np.linalg.norm(state) > 0.4:
+                safe_states.append(state)
+        self.safe_states = np.array(safe_states)
+    
     def reset(self):
-        #self.state = np.array([np.random.uniform(0, 2*np.pi), np.random.uniform(-8.0, 8.0)])
-        self.state = np.array([-0.1,0.5])
+        # Choose from random safe state np array
+        safe_states = self.safe_states
+        self.state = safe_states[np.random.randint(0, len(safe_states))]
+
+        #self.state = np.array([np.random.uniform(-2*np.pi, 2*np.pi), np.random.uniform(-8.0, 8.0)])
+        #self.state = np.array([-0.1,0.5])
         return self.state
     
     def _get_obs(self):
@@ -248,6 +268,12 @@ class InvertedPendulum(PendulumEnv):
     def get_alpha(self):
         return self.alpha
     
+    def set_mode(self, mode):
+        self.mode = mode
+
+    def get_mode(self):
+        return self.mode
+    
     def predict(self, x, model):
         # convert to pytorch tensor
         x_tensor = torch.tensor(x, dtype=torch.float32).to(self.device).unsqueeze(0)
@@ -274,7 +300,7 @@ class FCNet(nn.Module):
 
         self.fc_layers = nn.ModuleList([nn.Linear(width[i], width[i+1]).double() for i in range(len(width)-1)])
     
-    def forward(self, x, sgn):
+    def forward(self, x, sgn=None):
         nBatch = x.size(0)
 
         # Normal FC network.
@@ -413,6 +439,34 @@ class Dataset_list(torch.utils.data.Dataset):
     y = self.labels[index]
 
     return X, y
+  
+
+def run_simulation(env):
+    num_steps = 300
+
+    exit_bool = False
+    exit_step = 0
+    exit_state = np.zeros((2,1))
+    state = env.reset()
+    for step in range(num_steps):
+        action = env.ref_controller(state)
+        # choose random action and convert to float
+        #action = np.random.uniform(-10.0, 10.0)
+        #action = 0.0
+        next_state, _, _, done, _ = env.step(action)
+        actual_CBF_value = env.h(state, action)
+        state = next_state 
+        #print('Step: {}, State: {}, Action: {}, CBF: {}'.format(step, state, action, actual_CBF_value))
+        if actual_CBF_value < -1e-3:
+            exit_bool, exit_step, exit_state = True, step, state
+            ## exit loop
+            break
+        #env.render()
+        if step == num_steps - 1:
+            #print("Inverted Pendulum did not fall in {} steps".format(num_steps))
+            exit_bool, exit_step, exit_state = False, step, state
+    
+    return exit_bool, exit_step, exit_state
 
     
 

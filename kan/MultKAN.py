@@ -163,6 +163,7 @@ class MultKAN(nn.Module):
 
         self.act_fun = []
         self.depth = len(width) - 1
+        self.loss_mode = 'train'
         
         for i in range(len(width)):
             if type(width[i]) == int:
@@ -1501,7 +1502,7 @@ class MultKAN(nn.Module):
             global train_loss, reg_
             optimizer.zero_grad()
             x = dataset['train_input'][train_id]
-            x_tensor = x.to(self.device).clone().detach().requires_grad_(True)
+            x_tensor = x.to(self.device).clone().requires_grad_(True)
             pred = self.forward(x_tensor, singularity_avoiding=singularity_avoiding, y_th=y_th)
             dx = torch.autograd.grad(pred, x_tensor, grad_outputs=torch.ones_like(pred), create_graph=True)[0]
             self.dx = dx
@@ -1515,7 +1516,7 @@ class MultKAN(nn.Module):
             else:
                 reg_ = torch.tensor(0.)
             objective = train_loss + lamb * reg_
-            objective.requires_grad_()
+            #objective.requires_grad_()
             objective.backward()
             return objective
 
@@ -1530,23 +1531,37 @@ class MultKAN(nn.Module):
             
             train_id = np.random.choice(dataset['train_input'].shape[0], batch_size, replace=False)
             test_id = np.random.choice(dataset['test_input'].shape[0], batch_size_test, replace=False)
+
+            train_mapping = {}
+            test_mapping = {}
+
+            for i in range(len(train_id)):
+                train_mapping[train_id[i]] = i
+            
+            for i in range(len(test_id)):
+                test_mapping[test_id[i]] = i
+
+            self.train_mapping = train_mapping
+            self.test_mapping = test_mapping
             
             ## sort through ids and check label
             self.id_dict = {'train_id': {'initial': [], 'unsafe': []}, 'test_id': {'initial': [], 'unsafe': []}}
             for iter in train_id:
-                if dataset['train_label'][iter] == 0: # safe/initial
+                if dataset['train_label'][iter] == 1: # safe/initial
                     self.id_dict['train_id']['initial'].append(iter)
                 else:
                     self.id_dict['train_id']['unsafe'].append(iter)
             
             for iter in test_id:
-                if dataset['test_label'][iter] == 0:
+                if dataset['test_label'][iter] == 1:
                     self.id_dict['test_id']['initial'].append(iter)
                 else:
                     self.id_dict['test_id']['unsafe'].append(iter)
             
             self.train_id = train_id
             self.test_id = test_id
+
+            self.loss_mode = 'train'
 
             if _ % grid_update_freq == 0 and _ < stop_grid_update_step and update_grid and _ >= start_grid_update_step:
                 self.update_grid(dataset['train_input'][train_id])
@@ -1555,7 +1570,12 @@ class MultKAN(nn.Module):
                 optimizer.step(closure)
 
             if opt == "Adam":
-                pred = self.forward(dataset['train_input'][train_id], singularity_avoiding=singularity_avoiding, y_th=y_th)
+                x = dataset['train_input'][train_id]
+                x_tensor = x.to(self.device).clone().requires_grad_(True)
+                pred = self.forward(x_tensor, singularity_avoiding=singularity_avoiding, y_th=y_th)
+                dx = torch.autograd.grad(pred, x_tensor, grad_outputs=torch.ones_like(pred), create_graph=True)[0]
+                self.dx = dx
+                #pred = self.forward(dataset['train_input'][train_id], singularity_avoiding=singularity_avoiding, y_th=y_th)
                 train_loss = loss_fn(pred, dataset['train_label'][train_id])
                 if self.save_act:
                     if reg_metric == 'edge_backward':
@@ -1570,6 +1590,7 @@ class MultKAN(nn.Module):
                 loss.backward()
                 optimizer.step()
 
+            self.loss_mode = 'test'
             test_loss = loss_fn_eval(self.forward(dataset['test_input'][test_id]), dataset['test_label'][test_id])
             
             
